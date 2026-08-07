@@ -1,9 +1,13 @@
-baseURL = 'https://example.org/'
+baseURL = 'https://rrnotes.github.io/'
 title = 'Notes'
 theme = 'hugo-book'
 
 [markup.godmark.renderer]
   unsafe = true
+
+[caches]
+  [caches.images]
+    dir = ':cacheDir/images'
 
 [params]
   BookTheme = 'dark'

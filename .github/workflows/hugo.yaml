@@ -25,7 +25,7 @@ jobs:
       NODE_VERSION: 24.18.0
 
       # Set the build time zone
-      TZ: Europe/Oslo
+      TZ: Asia/Shanghai
     steps:
       - name: Checkout
         uses: actions/checkout@v7

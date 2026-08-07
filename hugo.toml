@@ -1,4 +1,4 @@
-baseURL = 'https://rrnotes.github.io/'
+baseURL = 'https://roundrobin792.github.io/rrnotes/'
 title = 'Notes'
 theme = 'hugo-book'
 

@@ -11,5 +11,5 @@ pluralizeListTitles = false
     dir = ':cacheDir/images'
 
 [params]
-  BookTheme = 'dark'
+  BookTheme = 'light'
   BookSection = '/'

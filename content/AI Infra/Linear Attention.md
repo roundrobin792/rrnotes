@@ -2,10 +2,10 @@
 title: "Linear Attention"
 weight: 1
 # bookFlatSection: false
-# bookToc: true
+bookToc: true
 # bookHidden: false
 # bookCollapseSection: false
-# bookComments: false
+# bookComments: true
 # bookSearchExclude: false
 # bookHref: ''
 # bookIcon: ''
@@ -13,3 +13,8 @@ weight: 1
 
 # Linear Attention
 
+## 1
+
+## 2
+
+## 3

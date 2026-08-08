@@ -1,6 +1,7 @@
 baseURL = 'https://roundrobin792.github.io/rrnotes/'
 title = 'Notes'
 theme = 'hugo-book'
+pluralizeListTitles = false
 
 [markup.godmark.renderer]
   unsafe = true

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" height="24px" viewBox="0 -960 960 960" width="24px" fill="#1f1f1f">
+  <defs>
+    <mask id="gearHole">
+      <rect x="0" y="-960" width="960" height="960" fill="white"/>
+      <circle cx="480" cy="-480" r="110" fill="black"/>
+    </mask>
+  </defs>
+  <g mask="url(#gearHole)">
+    <circle cx="480" cy="-480" r="260"/>
+    <rect x="445" y="-840" width="70" height="100" transform="rotate(0 480 -480)"/>
+    <rect x="445" y="-840" width="70" height="100" transform="rotate(45 480 -480)"/>
+    <rect x="445" y="-840" width="70" height="100" transform="rotate(90 480 -480)"/>
+    <rect x="445" y="-840" width="70" height="100" transform="rotate(135 480 -480)"/>
+    <rect x="445" y="-840" width="70" height="100" transform="rotate(180 480 -480)"/>
+    <rect x="445" y="-840" width="70" height="100" transform="rotate(225 480 -480)"/>
+    <rect x="445" y="-840" width="70" height="100" transform="rotate(270 480 -480)"/>
+    <rect x="445" y="-840" width="70" height="100" transform="rotate(315 480 -480)"/>
+  </g>
+</svg>

@@ -3,7 +3,7 @@ title = 'Notes'
 theme = 'hugo-book'
 pluralizeListTitles = false
 
-[markup.godmark.renderer]
+[markup.goldmark.renderer]
   unsafe = true
 
 [caches]

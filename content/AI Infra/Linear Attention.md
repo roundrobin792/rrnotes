@@ -16,6 +16,8 @@ bookToc: true
 
 # Linear Attention
 
+这是本人写的第一篇 AI Infra 相关的博客，因此有必要说一嘴：根据个人经验，AI 乃至整个机器学习领域，包括 NLP 相关的一些研究，很多时候是从一些“有道理但模糊”的 intuition 开始的，很多时候构造的公式、算法其实只是对现实规律的一个近似模拟，甚至有些时候都不能确定现实是否真的如此，只是研究者们提出的一种观点，并不具有严格的数学证明，大家都认可的原因仅仅是因为它有效。所以，在很多时候，只需要有一个可说的 intuition 来解释“为什么这样设计”就行了，多关注算法层面的、看得清摸得着的东西（比如能看懂公式，写出代码），不要在本身就没办法给出所谓的“严谨、完备”的解释的问题上钻牛角尖，没有任何意义。本文中的 GDN 一节便是如此。
+
 ## 概述
 
 {{% details "**什么是 Linear Attention（LA）？**" %}}
@@ -50,7 +52,7 @@ $$
 
 从代数结构上分析，$(1)$ 式的中的 $\operatorname{exp}(\cdot)$ 函数可以看成是计算 $Q_{t}$ 与其它 token 的 key 的“相似度”的函数，中间的 $\frac{\operatorname{exp}(\frac{Q_{t}K_{i}^T}{\sqrt{d_{k}}})}{\sum_{j=1}^{t}\operatorname{exp}(\frac{Q_{t}K_{j}^T}{\sqrt{d_{k}}})}$ 这一部分可以看成是将与序列中所有之前的 token 的相似度归一化，以算出 $V_{i}$ 在 $O_{t}$ 中所占的权重。
 
-假设我们将“相似度”函数记为 $\operatorname{sim}(q, k)$，那么论文所做的核心修改就在于**将其修改为“可分离”的版本，即能够将其写成 $\operatorname{sim}(q, k) = \phi(q)\phi(k)$ 的形式**，而这对于 Full Attention 中的 $\operatorname{sim}(q, k) = \operatorname{exp}(q, k)$ 来说是做不到的。
+假设我们将“相似度”函数记为 $\operatorname{sim}(q, k)$，那么论文所做的核心修改就在于**将其修改为“可分离”的版本，即能够将其写成 $\operatorname{sim}(q, k) = \phi(q)\phi(k)$ 的形式**（其中 $\phi(\cdot)$ 叫做特征映射，用于将 $q$、$k$ 映射到特征空间使得其内积保持原来相似度函数的效果），而这对于 Full Attention 中的 $\operatorname{sim}(q, k) = \operatorname{exp}(q, k)$ 来说是做不到的。
 
 那么这样做究竟能产生什么样的效果？我们将其带入 $(1)$ 进行推导：
 
@@ -86,60 +88,63 @@ $$
 
 ### Gated DeltaNet（GDN）
 
-上一节推导出的朴素 LA 已经把复杂度降到了 $O(nd^2)$，但它的递归式过于简单：
+上一节推导出的朴素 LA 公式如下：
 
 $$
-S_t = S_{t-1} + \phi(K_t)^TV_t
+S_t = S_{t-1} + K_t^TV_t \\\\
+O_{t} = Q_{t}S_t
 $$
 
-新信息只是被**无条件地累加**进 $S$，既没有"该忘掉什么"的机制，也没有"该覆盖什么"的机制。GDN 正是沿着这两个方向对递归式做改进的：用**衰减门控 $\alpha$** 控制旧记忆的保留比例，用 **Delta Rule（配合更新门控 $\beta$）** 控制新信息的写入方式。本节内容参考 GDN 原始论文[[2]](#Yang2024)与 Qwen3-Next 的实现[[3]](#Qwen3Next2025)。
+从这里开始，我们会省略掉用于归一化的分母和特征映射 $\phi$，现实中实现各类 LA 的时候，往往会将相同功能的操作放在其它位置，上面的递归式才是 LA 的核心部分。
 
-#### 改进一：Delta Rule —— 把"累加"改成"覆盖"
+虽然能降低复杂度，但是实验证明这种方法的实际效果明显落后于传统的 Full Attention。可能的解释是，$S_t$ 承载了包括当前和之前所有 token 的“记忆”（通过单纯累加 key 和 value 的外积），由于状态 $S_t$ 可存储的 token 信息数量有限，当输入序列长度超出上限的时候，就会导致不同 token 之间的信息相互干扰。对此，更加详细的 intuition 可以参考[[6]](#Schlag2021)。
 
-先看朴素 LA 写入方式的问题。把 $S$ 理解成一张以 key 为索引、以 value 为内容的记忆表，那么 $S_t = S_{t-1} + \phi(K_t)^TV_t$ 做的事情相当于 `mem[k] += v`，是**累加**语义。这带来的后果是：如果序列中先后出现了两个相近的 key，它们对应的 value 会被叠加在一起，而不是后者替换前者。换句话说，这张记忆表只能追加，不能修改。
+既然能力下降的根本原因是 $S_t$ 信息过载，那么优化的方向就自然是让 $S_t$ 在递推更新时能够适当的“忘记”之前的信息，最好可以有选择性地忘记不重要的信息。为此，GDN 糅合了两种被证明可行的机制：
 
-Delta Rule 的思路是把它改成 `mem[k] = v` 的**覆盖**语义。具体做法分三步：
+* **衰减门控 $\alpha$**：根据时间维度的距离逐渐忘记较远 token 的信息。
+* **Delta Rule（配合更新门控 $\beta$）**：在往状态中添加当前 token 的信息时针对性地删除与之重合的信息。
 
-1. **读**：先用当前的 $K_t$ 去查询已有的记忆，得到记忆当前对这个 key 的"预测值"$\tilde{V_t} = K_tS_{t-1}$；
-2. **算差**：真实值与预测值之差 $V_t - \tilde{V_t}$，即所谓的 delta（$\Delta$），代表"记忆还差多少才对"；
-3. **写**：只把这个差值写回记忆，并用一个系数 $\beta_t$ 控制写入的强度。
+本节将详细讲解上述两种机制的实现方式，内容参考 GDN 原始论文[[2]](#Yang2024)与 Qwen3-Next 的实现[[3]](#Qwen3Next2025)。
 
-写成公式即为：
+#### Delta Rule（配合更新门控 $\beta$）
+
+根据论文[[6]](#Schlag2021)，从数学形式上，朴素 LA 的状态 $S$ 可以被理解为一张以 key 为索引、以 value 为内容的记忆表（key-value accociative memory，写入的语义是累加 token 的 key、value 的外积，召回的语义是 $\tilde{V}_{t} = K_{t} S$）。$S_t = S_{t-1} + K_t^TV_t$ 的语义是单纯添加信息，前文说过，当序列较长时，会超出状态 $S$ 可存储 token 信息的上限。
+
+Delta Rule 的思路是在添加新的 token 信息时，同时抹除一部分与之重叠的信息。公式如下：
+
+$$
+\tilde{V}_t = K_tS_{t-1} \\\\
+V_t' = \beta_tV_t + (1 - \beta_t) \tilde{V}_t \\\\
+S_t = S_{t-1} - \underbrace{K_t^T\tilde{V}_t}_{抹除的信息} + \underbrace{K_t^TV_t'}_{添加的信息}
+$$
+
+代入化简即得：
 
 $$
 S_t = S_{t-1} + \beta_tK_t^T(V_t - K_tS_{t-1}) \tag{3}
 $$
 
-$(3)$ 式中的 $\beta_t \in (0, 1)$ 就是**更新门控**，它决定这一步"改写"得有多彻底：$\beta_t \to 0$ 时记忆几乎不动，$\beta_t \to 1$ 时旧值被完全替换成新值。可以把它类比为梯度下降中的学习率——事实上，Delta Rule 正是最小二乘意义下对 $\lVert V_t - K_tS \rVert^2$ 做一步梯度下降的结果，这也是它名字的由来。
+$(3)$ 式中的 $\beta_t \in (0, 1)$ 被称为**更新门控（update gate）**，是一个数值，从上面的公式不难看出，它控制的是抹除和写入信息的强度。
 
-把 $(3)$ 式展开整理，可以得到一个更能说明问题的形式：
+所有 token 的更新门控在进入 Delta Rule 之前计算好，以 $\beta \in \mathbb{R}^n$ 的形式传入。一种简单的实现是，通过对输入做一层线性投影，再经过一层 sigmoid 激活得到。
 
-$$
-\begin{align*}
-S_t &= S_{t-1} + \beta_tK_t^TV_t - \beta_tK_t^TK_tS_{t-1} \\\\
-    &= (I - \beta_tK_t^TK_t)S_{t-1} + \beta_tK_t^TV_t
-\end{align*}
-$$
+#### 衰减门控 $\alpha$
 
-对比朴素 LA 的 $S_t = S_{t-1} + \phi(K_t)^TV_t$ 可以看出，Delta Rule 的本质是：**旧状态不再原封不动地传递下去，而是先被一个由当前输入决定的矩阵 $(I - \beta_tK_t^TK_t)$ 作用一次**。这个矩阵是单位阵的一个 rank-1 修正，它的作用是在 $K_t$ 所指的那个方向上"擦除"旧记忆，从而为新值腾出位置，而其它方向不受影响。
-
-#### 改进二：衰减门控 $\alpha$ —— 让模型学会遗忘
-
-Delta Rule 解决了写入的问题，但还有一个问题没解决：$S$ 的容量是固定的（$d_k \times d_v$），如果只写不忘，历史信息会不断累积、相互干扰，序列越长越严重。
-
-早期的改进（如 RetNet）给递归式加了一个固定的衰减因子 $\gamma$，即 $S_t = \gamma S_{t-1} + \phi(K_t)^TV_t$，让远处的信息随距离自然淡出。但固定的 $\gamma$ 意味着所有 token、所有任务都用同一个遗忘速度，显然不够灵活。GDN 把它换成了**由当前输入决定的** $\alpha_t$，让模型自己判断此刻应该多记还是多忘：
+**衰减门控**是另一种自动抹除 $S$ 中信息的方式，其核心思想是每一步迭代都先对之前的记忆用衰减系数 $\alpha_t$ 做统一的衰减，然后再写入新信息，公式如下：
 
 $$
 S_t = \alpha_tS_{t-1} + (\text{新信息的写入项})
 $$
 
-$\alpha_t$ 的参数化方式值得单独一提。它并不是简单地过一个 sigmoid，而是（以 Qwen3-Next 的实现为例）：
+每个 token 都有自己的衰减系数，以控制对之前的 token 信息是“多忘”还是“少忘”。一个比较好理解的例子是：如果一个 token 前是句号，那么该 token 是新句子的开头，则需要多忘；而如果和前面的 token 构成连贯的句子，则需要少忘。早期的 LA（如 RetNet）就只用了一个固定的衰减因子，事实证明恒定的遗忘速度不够灵活。
+
+$\alpha_t$ 的计算略微复杂一点，做线性投影后并不是简单地过一个 sigmoid，而是（以 Qwen3-Next 的实现为例）：
 
 $$
-\alpha_t = \operatorname{exp}(-A \cdot \operatorname{softplus}(X_tW_{\alpha} + b_{dt})) \tag{4}
+\alpha = \operatorname{exp}(-A \odot \operatorname{softplus}(w_{\alpha}X^T + b_{\alpha})) \tag{4}
 $$
 
-其中 $A = \operatorname{exp}(A_{\log})$ 是一个可学习的正参数。这个式子看起来绕，但结构上保证了 $\alpha_t \in (0, 1)$：$\operatorname{softplus}(\cdot)$ 的输出恒正，$A$ 恒正，所以指数部分恒负，取指数后必然落在 $(0, 1)$ 内，无需额外的截断。这种写法继承自 Mamba 的离散化参数化，好处是衰减率在对数空间中是线性的，长序列下连乘时数值更稳定。
+其中 $A = \operatorname{exp}(A_{\log})$ 是一个可学习的正参数。该式结构上保证了 $\alpha_t \in (0, 1)$（$\operatorname{softplus}(\cdot)$ 的输出恒正，$A$ 恒正，所以指数部分恒负）。这种写法继承自 Mamba 的离散化参数化，好处是衰减率在对数空间中是线性的，长序列下连乘时数值更稳定。
 
 需要注意的是，在 Qwen3-Next 中 $\alpha_t$ 是 **per-head 的标量**（每个注意力头一个值），而 Kimi Linear 的 KDA 机制将其细化为了 **per-channel 的向量**（每个特征维度一个值），以获得更精细的记忆控制能力[[4]](#KimiLinear2025)。
 
@@ -148,34 +153,14 @@ $$
 把两项改进合并，并注意实现中的执行顺序是**先衰减、再读、后写**（即 Delta Rule 读取的是已经衰减过的状态），可得 GDN 的完整递推式：
 
 $$
-\begin{align*}
-S_t &= \alpha_tS_{t-1} + \beta_tK_t^T(V_t - K_t \cdot \alpha_tS_{t-1}) \\\\
-    &= \alpha_t(I - \beta_tK_t^TK_t)S_{t-1} + \beta_tK_t^TV_t
-\end{align*}
-\tag{5}
+S_t = \alpha_tS_{t-1} + \beta_tK_t^T(V_t - K_t \cdot \alpha_tS_{t-1}) \tag{5}
 $$
 
 $$
 O_t = Q_tS_t \tag{6}
 $$
 
-对照上一节朴素 LA 的结论，有两处差异值得说明：
-
-其一，$(5)$ 式中旧状态的传递算子是 $\alpha_t(I - \beta_tK_t^TK_t)$，它同时受 $\alpha_t$、$\beta_t$、$K_t$ 三者影响，全部依赖于当前输入。这与朴素 LA 中恒为 $I$、RetNet 中恒为 $\gamma I$ 的传递算子形成鲜明对比。
-
-其二，$(6)$ 式**不再有归一化分母**，即上一节推导出的 $z_t$ 递归被去掉了。原因是 GDN 转而使用 RMSNorm 来做输出侧的归一化（见后文），而且经过 l2 归一化后的 $Q$、$K$ 本身数值范围就已经受控，分母带来的收益不足以抵消它的计算开销。这也意味着 GDN 中的 $\phi(\cdot)$ 已经不再承担"保证分母非零"的职责，它退化成了一个普通的激活层。
-
-{{% details "**GDN 还能写成 Full Attention 那样的逐行公式吗？**" %}}
-不能。把 $(5)$ 式反复展开到底，可以得到：
-
-$$
-S_t = \sum_{i=1}^t \left( \prod_{l=i+1}^t \alpha_l(I - \beta_lK_l^TK_l) \right) \beta_iK_i^TV_i
-$$
-
-代入 $(6)$ 式后，$V_i$ 前面的系数是一个**连乘积**，它依赖于 $i$ 与 $t$ 之间**所有中间 token** 的 $\alpha_l$、$\beta_l$ 和 $K_l$，而不只是 $Q_t$ 和 $K_i$。这意味着无法写出一个 $A_{ti} = f(Q_t, K_i)$ 形式的注意力权重，也就没有对应的 $n \times n$ 注意力矩阵。
-
-朴素 LA 与 RetNet 之所以还能写成注意力矩阵形式（后者对应一个固定的指数衰减掩码），是因为它们的传递算子与输入无关。转折点发生在 Delta Rule 引入 $(I - \beta_tK_t^TK_t)$ 的那一刻——从这里开始，LA 就彻底脱离了 Attention 的框架，更适合被理解为一个**隐状态为矩阵的非线性 RNN**。
-{{% /details %}}
+在这里省略详细的复杂度分析，不难得出时间复杂度仍然是 $O(nd^2)$。
 
 #### 其余组件
 
@@ -202,32 +187,6 @@ $$
 3. 对 $Q$、$K$ 做 l2 归一化；
 4. 初始化 $S_0 = 0$，按 $(5)$ 式逐 token 递推更新状态，并按 $(6)$ 式读出每一步的输出；
 5. 对输出施加 RMSNorm 与 $\operatorname{silu}$ 门控，最后经输出投影得到该层结果。
-
-#### 复杂度
-
-GDN 相对朴素 LA 增加了这么多机制，复杂度是否还保持线性？简要估算递推一步的开销：衰减 $\alpha_tS_{t-1}$ 为 $O(d_kd_v)$；读取 $K_tS_{t-1}$ 为 $O(d_kd_v)$；外积写入 $\beta_tK_t^T(\cdot)$ 为 $O(d_kd_v)$；读出 $Q_tS_t$ 为 $O(d_kd_v)$。四项均为 $O(d_kd_v)$，故单步复杂度为 $O(d_kd_v)$，$n$ 步累计即 $O(nd_kd_v)$，近似处理后仍为 $O(nd^2)$，与朴素 LA 同阶。
-
-关键在于，Delta Rule 引入的 $(I - \beta_tK_t^TK_t)$ 虽然形式上是一个 $d_k \times d_k$ 的矩阵，但由于它是单位阵的 rank-1 修正，实际计算时无需显式构造该矩阵，只需按 $(3)$ 式的"读—算差—写"三步走，每步都是向量与矩阵的运算，因此没有引入额外的复杂度。这正是 Delta Rule 能够被"免费"加入的原因。
-
-除时间复杂度外，GDN 在推理时的显存优势同样显著。Full Attention 的 KV cache 大小为：
-
-$$
-b \times n \times h \times d_{head} \times 2 \times \mathrm{bytes}
-$$
-
-而 GDN 需要缓存的状态矩阵 $S$ 大小为：
-
-$$
-b \times h \times d_{head}^2 \times \mathrm{bytes}
-$$
-
-后者**不含 $n$ 项**，即显存占用与上下文长度无关。虽然引入了 $d_{head}^2$ 的平方项，但 $d_{head}$ 通常较小（Qwen3-Next 中为 128），在长上下文场景下这笔交换是相当划算的。
-
-{{% details "**既然 GDN 这么好，为什么不完全取代 Full Attention？**" %}}
-因为 GDN 的建模能力仍受限于 $S$ 的固定容量。无论门控多灵活、写入多精准，把任意长度的历史压缩进一个 $d_k \times d_v$ 的矩阵都是**有损**的，序列越长损失越明显。这在需要**精确检索**的任务上尤其致命——比如从长文档中定位某一具体事实，Full Attention 保留了所有 token 的完整表示，可以精确定位；而 GDN 中该信息早已被混合、衰减进 $S$，难以无损取回。
-
-正因如此，Qwen3-Next 与 Kimi Linear 都采用了**混合架构**：每三个 GDN 层搭配一个 Full Attention 层（3:1 比例），用少量的全注意力层承担精确检索的职责，其余层则享受线性复杂度带来的效率收益。
-{{% /details %}}
 
 ## 实现
 
@@ -312,6 +271,19 @@ context = context * F.silu(gate)
 
 对照完代码可以看出，GDN 相对朴素 LA 的改动集中在递推主循环的五行之内：加一行衰减、把一行累加拆成读—算差—写三行。其余部分——投影、归一化、输出门控——都是围绕这个核心的辅助设施。这也解释了为什么 GDN 能在不改变 $O(nd^2)$ 复杂度的前提下显著提升建模能力：所有改进都作用在**如何维护 $S$** 这件事上，而没有触碰"$S$ 大小固定"这个前提。
 
+## Chunk-wise Parallelism
+
+理论上，LA 确实降低了长序列场景下的时间复杂度。然而，时间复杂度衡量的仅仅是“计算所需的操作数”，在串行计算时确实能加速，但是在支持并行运算时并不一定如此。
+
+现实中 LA 确实遇到了这个问题。为方便理解，我们此处以朴素 LA 为例，解释问题的根源，以及什么是、为什么需要 chunk-wise 实现。
+
+朴素 LA 的公式有两种表示法：
+
+1. **循环形式（Recurrent form）**：$S_t = S_{t-1} + K_t^TV_t$，$O_t = Q_t S_t$。
+2. **并行形式（Parallel form）**：$O = (QK^T \odot M)V$，其中 $M$ 为 causal mask。
+
+从循环形式可以导出并行形式，推导此处省略。那么，为什么叫循环形式和并行形式？循环形式比较好理解，即需要在一个逐 token 迭代的循环中一行一行地求出输出矩阵 $O$，每一轮迭代的状态 $S_t$ 都依赖于上一轮的 $S_{t-1}$（因此每轮迭代具有严格的先后次序关系，无法并行）；至于并行形式，其实时间复杂度仍为 $O(n^2d)$，但是由于是矩阵乘法，而 GPU 的 matmul 并行加速机制可能反而使得采用并行形式要快得多（对于序列长度和 hidden size 不过分大的情况下，甚至可能在 $O(1)$ 的时间内解决）。
+
 ## 参考文献
 <a id="Katharopoulos2020"></a>
 [1] [Katharopoulos, A., et al. (2020). Transformers are RNNs: Fast Autoregressive Transformers with Linear Attention. *ICML 2020*.](https://arxiv.org/abs/2006.16236)
@@ -327,3 +299,6 @@ context = context * F.silu(gate)
 
 <a id="Raschka2025"></a>
 [5] [Raschka, S. Gated DeltaNet for Linear Attention. *LLMs-from-scratch*, ch04/08_deltanet.](https://github.com/rasbt/LLMs-from-scratch/tree/main/ch04/08_deltanet)
+
+<a id="Schlag2021"></a>
+[6] [Schlag, I., Irie, K., & Schmidhuber, J. (2021). Linear Transformers Are Secretly Fast Weight Programmers. *ICML 2021*.](https://proceedings.mlr.press/v139/schlag21a.html)

@@ -115,7 +115,7 @@ Delta Rule 的思路是在添加新的 token 信息时，同时抹除一部分�
 $$
 \tilde{V}_t = K_tS_{t-1} \\\\
 V_t' = \beta_tV_t + (1 - \beta_t) \tilde{V}_t \\\\
-S_t = S_{t-1} - \underbrace{K_t^T\tilde{V}_t}_{抹除的信息} + \underbrace{K_t^TV_t'}_{添加的信息}
+S_t = S_{t-1} - \underbrace{K_t^T \tilde{V}_t}_{\text{抹除的信息}} + \underbrace{K_t^TV_t'}_{\text{添加的信息}}
 $$
 
 代入化简即得：

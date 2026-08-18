@@ -3,8 +3,16 @@ title = 'Notes'
 theme = 'hugo-book'
 pluralizeListTitles = false
 
-[markup.goldmark.renderer]
-  unsafe = true
+[markup]
+  [markup.goldmark]
+    [markup.goldmark.extensions]
+      [markup.goldmark.extensions.passthrough]
+        enable = true
+        [markup.goldmark.extensions.passthrough.delimiters]
+          block  = [['\[', '\]'], ['$$', '$$']]
+          inline = [['\(', '\)'], ['$', '$']]
+      [markup.goldmark.renderer]
+        unsafe = true
 
 [caches]
   [caches.images]

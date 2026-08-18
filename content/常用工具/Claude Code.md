@@ -11,4 +11,7 @@ bookToc: true
 # bookIcon: ''
 ---
 
+{{< katex />}}
+
 # Claude Code
+

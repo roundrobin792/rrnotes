@@ -188,9 +188,19 @@ $$
 4. 初始化 $S_0 = 0$，按 $(5)$ 式逐 token 递推更新状态，并按 $(6)$ 式读出每一步的输出；
 5. 对输出施加 RMSNorm 与 $\operatorname{silu}$ 门控，最后经输出投影得到该层结果。
 
+{{% details "**既然 GDN 这么好，为什么不完全取代 Full Attention？**" %}}
+因为 GDN 的建模能力仍受限于 $S$ 的固定容量。无论门控多灵活、写入多精准，把任意长度的历史压缩进一个 $d_k \times d_v$ 的矩阵都是**有损**的，序列越长损失越明显。这在需要**精确检索**的任务上尤其致命——比如从长文档中定位某一具体事实，Full Attention 保留了所有 token 的完整表示，可以精确定位；而 GDN 中该信息早已被混合、衰减进 $S$，难以无损取回。
+ 
+正因如此，Qwen3-Next 与 Kimi Linear 都采用了**混合架构**：每三个 GDN 层搭配一个 Full Attention 层（3:1 比例），用少量的全注意力层承担精确检索的职责，其余层则享受线性复杂度带来的效率收益。
+{{% /details %}}
+
 ## 实现
 
-理论部分讲清楚了 GDN 在做什么，本节则对照一份简化的 PyTorch 实现，看看这些机制在代码中分别对应哪几行。代码参考自 Sebastian Raschka 对 Qwen3-Next 官方实现的简化改写[[5]](#Raschka2025)，为便于阅读，省略了因果卷积部分，只保留递推的核心逻辑。
+理论部分详细讲解了 GDN 的机制和原理，本节则对照简化的 PyTorch 实现，介绍这些机制在代码对应的组件。代码参考自 Sebastian Raschka 对 Qwen3-Next 官方实现的简化改写[[5]](#Raschka2025)，为便于阅读，省略了因果卷积部分，只保留递推的核心逻辑。
+
+下图为论文[[2]](#Yang2024)中 Gated DeltaNet 的结构图：
+
+X
 
 ### 门控信号的计算
 
@@ -248,9 +258,7 @@ for t in range(num_tokens):
 有两处实现细节值得说明。其一，`(S * k_t.unsqueeze(-1)).sum(dim=-2)` 是在用广播加求和来表达向量与矩阵的乘法 $K_tS$，`k_t.unsqueeze(-1) * delta.unsqueeze(-2)` 则是外积 $K_t^T\Delta$，两者都避免了显式的 `matmul` 调用。其二，全程没有出现任何 $n \times n$ 的中间张量——`S` 的形状是 `(b, h, d, d)`，与 `num_tokens` 无关，这正是 GDN 显存优势的来源。
 
 {{% details "**这个 for 循环不会很慢吗？**" %}}
-会。逐 token 的 Python 循环无法利用 GPU 的并行能力，这份实现的目的是把递推逻辑讲清楚，而非用于生产。
-
-实际训练中采用的是 **chunk-wise 并行**策略：把序列切成若干固定大小的 chunk，chunk 内部用矩阵乘法一次性算完（充分利用 tensor core），chunk 之间才串行地传递状态 $S$。这样既保持了 $O(nd^2)$ 的复杂度，又把并行度提到了可接受的水平。相关的融合算子可以在 [flash-linear-attention](https://github.com/fla-org/flash-linear-attention) 中找到。
+会。逐 token 的循环无法利用 GPU 的并行能力，这份实现的目的仅是展示逻辑，而非用于生产。实际训练中采用的是 **chunk-wise 并行**策略（后文有详细介绍）。相关的融合算子可以在 [flash-linear-attention](https://github.com/fla-org/flash-linear-attention) 中找到。
 {{% /details %}}
 
 ### 输出门控
@@ -284,6 +292,32 @@ context = context * F.silu(gate)
 
 从循环形式可以导出并行形式，推导此处省略。那么，为什么叫循环形式和并行形式？循环形式比较好理解，即需要在一个逐 token 迭代的循环中一行一行地求出输出矩阵 $O$，每一轮迭代的状态 $S_t$ 都依赖于上一轮的 $S_{t-1}$（因此每轮迭代具有严格的先后次序关系，无法并行）；至于并行形式，其实时间复杂度仍为 $O(n^2d)$，但是由于是矩阵乘法，而 GPU 的 matmul 并行加速机制可能反而使得采用并行形式要快得多（对于序列长度和 hidden size 不过分大的情况下，甚至可能在 $O(1)$ 的时间内解决）。
 
+{{% details "**矩阵乘法如何并行计算？**" %}}
+在数学上，一个大的矩阵乘法（matmul）可以被分解为多个互相独立的小矩阵乘法，然后通过拼接和累加得到最终结果。
+
+假设有两个矩阵 $A \in \mathbb{R}^{M \times N}$，$B \in \mathbb{R}^{N \times K}$，我们要计算 $O = A \cdot B \in \mathbb{R}^{M \times K}$。要想理解如何将计算并行拆分，首先要从两个不同的维度来理解结果矩阵 $O$：
+
+1. $O$ 可以看成是沿着隐藏维度的 $N$ 个“切片”的累加，每个切片是 $A$ 的一列和 $B$ 的一行的外积：$O = \sum_{i=1}^N A_{[:, i]} B_{[i, :]}$。
+2. $O$ 中各个位置的元素的计算互不干扰（$O_{ij} = A_{[i, :]} B_{[:, j]}$），从而如果把 $O$ 划分成网格，那么各个格子的计算也互不干扰：$O_{[r_1:r_2, c_1:c_2]} = A_{[r_1:r_2, :]} B_{[:, c_1:c_2]}$。
+
+讨论 GEMM（General Matrix Multiplication，通用矩阵乘法）时，我们可以先简单地将 GPU 的结构理解为多个并行的 matmul ALU。实际计算 $A \cdot B$ 时，会将输出 $O$ 拆成网格状，每个 ALU 负责一个格子中数值的计算；计算时，每个 ALU 又沿隐藏维度 $N$ 将计算拆分为多段分多次执行，每次的结果都累加到所负责的格子中。可以认为，按 $M \times K$ 平面的拆分是空间维度（即存储位置）的拆分，而按隐藏维度的拆分是时间维度的拆分。
+{{% /details %}}
+
+因此，引入一种新的 Chunk-wise parallel form 来作为循环形式和并行形式的折中方案，这种方案的实现思路如下：
+
+将输入按 token 序列维度均分为 $\frac{n}{C}$ 段（$C$ 整除 $n$），即每段长度为 $C$，则 $Q$、$K$、$V$ 也均在序列维度被拆成了 $\frac{n}{C}$ 段。记 $Q_{[t]} \in \mathbb{R}^{C \times d}$ 为 chunk $t$ 中 tokens 在 $Q$ 中对应的一段（即 $Q_{[tC+1:(t+1)C]}$），且 $t \in [0, \frac{n}{C})$；$K_{[t]}$ 和 $V_{[t]}$ 的定义类似。状态矩阵 $S$ 的定义不变，但写法改为 $S_{[t]}^i = S_{tC+1}$，$i \in [1, C]$（注意，chunk 的索引从 0 开始，而 chunk 内部的索引从 1 开始）。此外，我们定义每个 chunk 的初始状态为 $S_{[t]}^0 = S_{[t-1]}^C$。
+
+在上述定义的基础上，我们可以推导出这样的递归公式：
+
+$$
+S_{[t+1]} = S_{[t]} + V_{[t]}^T K_{[t]} \in \mathbb{R}^{d \times d} \\\\
+O_{[t]} = Q_{[t]} S_{[t]}^T + (Q_{[t]} K_{[t]}^T \odot M_C) V_{[t]} \in \mathbb{R}^{C \times d}
+$$
+
+详细的推导过程见论文[[7]](#songlin2024)。其要点在于，这种方式同时满足了递归的形式（由逐 token 迭代改为逐 chunk）和矩阵乘法形式。我们可以在降低算法复杂度的同时利用硬件的并行计算特性，并通过调整 chunk 大小 $C$，将二者协调的最佳的状态，使计算效率最大化。
+
+除了朴素 LA，Delta Rule 和 Gated Delta Rule 也都有对应的 chunk-wise 实现（[[2]](#Yang2024), [[7]](#songlin2024)）。其推导纯粹是数学上的 trick，较复杂，论文中的讲解也较为详细，故不在这里展开。
+
 ## 参考文献
 <a id="Katharopoulos2020"></a>
 [1] [Katharopoulos, A., et al. (2020). Transformers are RNNs: Fast Autoregressive Transformers with Linear Attention. *ICML 2020*.](https://arxiv.org/abs/2006.16236)
@@ -302,3 +336,6 @@ context = context * F.silu(gate)
 
 <a id="Schlag2021"></a>
 [6] [Schlag, I., Irie, K., & Schmidhuber, J. (2021). Linear Transformers Are Secretly Fast Weight Programmers. *ICML 2021*.](https://proceedings.mlr.press/v139/schlag21a.html)
+
+<a id="songlin2024"></a>
+[7] [Songlin, Y., Wang, B. (2024). Parallelizing Linear Transformers with the Delta Rule over Sequence Length. *Neurips 2024*.](https://proceedings.neurips.cc/paper_files/paper/2024/file/d13a3eae72366e61dfdc7eea82eeb685-Paper-Conference.pdf)

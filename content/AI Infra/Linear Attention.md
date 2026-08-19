@@ -206,7 +206,7 @@ $$
 
 先看三个门控信号是怎么从输入算出来的。$Q$、$K$、$V$ 的投影与标准注意力无异，此处略过：
 
-```python
+```python {linenos=table}
 beta = torch.sigmoid(self.W_beta(x))
 alpha_log = -self.A_log.exp().view(1, 1, -1) * F.softplus(
     self.W_alpha(x) + self.dt_bias
@@ -223,7 +223,7 @@ $\alpha$ 则对应理论部分的 $(4)$ 式。这里把它拆成了 `alpha_log` 
 
 ### l2 归一化
 
-```python
+```python {linenos=table}
 queries = l2norm(queries, dim=-1) / (self.head_dim ** 0.5)
 keys = l2norm(keys, dim=-1)
 ```
@@ -234,7 +234,7 @@ keys = l2norm(keys, dim=-1)
 
 这是整个 GDN 的核心，也是与标准注意力差异最大的地方：
 
-```python
+```python {linenos=table}
 S = x.new_zeros(b, self.num_heads, self.head_dim, self.head_dim)
 
 for t in range(num_tokens):
@@ -263,7 +263,7 @@ for t in range(num_tokens):
 
 ### 输出门控
 
-```python
+```python {linenos=table}
 context = torch.stack(outs, dim=2).transpose(1, 2).contiguous()
 context = context.view(b, num_tokens, self.num_heads, self.head_dim)
 

@@ -200,7 +200,7 @@ $$
 
 下图为论文[[2]](#Yang2024)中 Gated DeltaNet 的结构图：
 
-X
+{{< figure src="https://rrnotes-images.oss-cn-hangzhou.aliyuncs.com/ai-infra/linear-attention/gdn-structure.png" width="500" alt="gdn-structure" >}}
 
 ### 门控信号的计算
 
